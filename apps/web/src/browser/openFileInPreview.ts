@@ -110,21 +110,12 @@ export async function openUrlInPreview<E>(input: {
   });
 }
 
-/**
- * Opens a browser document in the integrated browser. Inside the workspace the
- * page may load sibling assets; a file outside it is served on its own.
- */
-export async function openFileInPreview<AssetError, PreviewError>(input: {
-  readonly threadRef: ScopedThreadRef;
-  readonly filePath: string;
-  readonly workspaceRoot: string | undefined;
-  readonly httpBaseUrl: string;
-  readonly createAssetUrl: (input: {
-    readonly environmentId: EnvironmentId;
-    readonly input: { readonly resource: AssetResource };
-  }) => Promise<AtomCommandResult<AssetCreateUrlResult, AssetError>>;
-  readonly openPreview: OpenPreviewMutation<PreviewError>;
-}): Promise<
+/** Opens a browser document in the integrated browser. */
+export async function openFileInPreview<AssetError, PreviewError>(
+  input: FileAssetUrlInput<AssetError> & {
+    readonly openPreview: OpenPreviewMutation<PreviewError>;
+  },
+): Promise<
   AtomCommandResult<
     void,
     AssetError | PreviewError | BrowserPreviewUnavailableError | BrowserSettingsReadError
@@ -139,6 +130,45 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       ),
     );
   }
+  const assetUrl = await createFileAssetUrl(input);
+  if (assetUrl._tag === "Failure") return AsyncResult.failure(assetUrl.cause);
+  return openUrlInPreview({
+    threadRef: input.threadRef,
+    url: assetUrl.value,
+    openPreview: input.openPreview,
+  });
+}
+
+type FileAssetUrlInput<AssetError> = {
+  readonly threadRef: ScopedThreadRef;
+  readonly filePath: string;
+  readonly workspaceRoot: string | undefined;
+  readonly httpBaseUrl: string;
+  readonly createAssetUrl: (input: {
+    readonly environmentId: EnvironmentId;
+    readonly input: { readonly resource: AssetResource };
+  }) => Promise<AtomCommandResult<AssetCreateUrlResult, AssetError>>;
+};
+
+/**
+ * Opens a browser document in the system browser. The signed asset URL needs no
+ * session cookie, so it loads from a remote environment too, until it expires.
+ */
+export async function openFileInSystemBrowser<AssetError>(
+  input: FileAssetUrlInput<AssetError> & {
+    readonly openExternal: (url: string) => Promise<void>;
+  },
+): Promise<AtomCommandResult<void, AssetError>> {
+  const assetUrl = await createFileAssetUrl(input);
+  if (assetUrl._tag === "Failure") return AsyncResult.failure(assetUrl.cause);
+  await input.openExternal(assetUrl.value);
+  return AsyncResult.success(undefined);
+}
+
+/** Inside the workspace the page may load sibling assets; a file outside it is served on its own. */
+async function createFileAssetUrl<AssetError>(
+  input: FileAssetUrlInput<AssetError>,
+): Promise<AtomCommandResult<string, AssetError>> {
   const insideWorkspace =
     mediaFileReference(input.filePath, input.workspaceRoot).relativePath !== undefined;
   const assetResult = await input.createAssetUrl({
@@ -151,18 +181,12 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       },
     },
   });
-  if (assetResult._tag === "Failure") {
-    return AsyncResult.failure(assetResult.cause);
-  }
+  if (assetResult._tag === "Failure") return AsyncResult.failure(assetResult.cause);
   const assetUrl = resolveAssetUrl(input.httpBaseUrl, assetResult.value.relativeUrl);
   if (assetUrl === null) {
     return AsyncResult.failure(
       Cause.die(new Error("The environment returned an invalid asset URL.")),
     );
   }
-  return openUrlInPreview({
-    threadRef: input.threadRef,
-    url: assetUrl,
-    openPreview: input.openPreview,
-  });
+  return AsyncResult.success(assetUrl);
 }
